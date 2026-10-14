@@ -1,0 +1,95 @@
+name: Construire et publier le site
+
+# Les guides de rôle vivent en markdown dans CIASETIN-Documentation-Dump.
+# À chaque déploiement, on les récupère et on les rend en PDF dans guides/,
+# pour que le site serve toujours la version la plus à jour.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  # Permet au dépôt de documentation de déclencher une reconstruction
+  # quand un guide change (voir notify-site.yml dans ce dépôt-là).
+  repository_dispatch:
+    types: [guides-updated]
+  # Filet de sécurité : si un déclencheur est manqué, le site se rafraîchit.
+  schedule:
+    - cron: "17 8 * * 1"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Récupérer le site
+        uses: actions/checkout@v4
+
+      - name: Récupérer les guides de rôle
+        # Tant que le dépôt de documentation n'a pas poussé ses guides, cette
+        # étape peut échouer sans empêcher la publication du site.
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: Hackathon-CIASETIN/CIASETIN-Documentation-Dump
+          path: .docs
+          # Dépôt public : aucun secret nécessaire. S'il devient privé,
+          # créer un PAT en lecture et l'ajouter comme secret DOCS_REPO_TOKEN.
+          token: ${{ secrets.DOCS_REPO_TOKEN || github.token }}
+
+      - name: Vérifier la présence des guides
+        id: guides
+        run: |
+          if [ -d ".docs/Event Guides/Staffing Guides" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Guides introuvables dans le dépôt de documentation — les PDF versionnés dans guides/ sont publiés tels quels."
+          fi
+
+      - name: Installer Python et Chromium
+        if: steps.guides.outputs.present == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install markdown playwright
+          playwright install --with-deps chromium
+
+      - name: Rendre les guides en PDF
+        if: steps.guides.outputs.present == 'true'
+        run: |
+          python tools/build-guides.py \
+            ".docs/Event Guides/Staffing Guides" \
+            guides
+
+      - name: Retirer les sources du paquet publié
+        run: rm -rf .docs tools
+
+      - name: Préparer Pages
+        uses: actions/configure-pages@v5
+        with:
+          # Active GitHub Pages au premier passage : rien à cliquer dans
+          # Settings → Pages, la source est réglée sur « GitHub Actions ».
+          enablement: true
+
+      - name: Téléverser le site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publier sur GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
